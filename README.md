@@ -42,7 +42,8 @@ app/
     imports/           read file -> detect headers/columns -> stage rows -> review -> commit
     analytics.py       LedgerView (ledger loaded + WAC-walked once per request); overview,
                        trends, product performance, expense breakdown
-    inventory.py       estimated stock, days left, fast/slow/dead stock, reorder suggestions
+    inventory.py       stock (counted or estimated), days left, fast/slow/dead stock, reorder
+    stock_counts.py    physical stock counts: record, void, live variance vs records
     customers.py       new vs returning, top/dormant customers, concentration, who owes you
     intelligence.py    rule-based insights (what happened / why / evidence / what to do) and
                        the Business Health Score
@@ -64,6 +65,7 @@ tests/           API-level tests against real Postgres
 | WAC costing (§10.3) | COGS uses weighted-average cost per product when purchases and sales carry quantity. Otherwise falls back to purchases-in-period and labels profit **estimated**. |
 | Offline sync (§7.4) | `client_ref` is unique per business. Re-sending returns the original transaction (200) instead of duplicating. |
 | Explainable intelligence (§15–17) | Insights are deterministic rules with tunable thresholds at the top of `intelligence.py`. Each carries evidence and a confidence. Health Score dimensions without enough data are *skipped*, not scored zero, and the response states what share of the score is backed by data. Inflation isn't faked. |
+| Physical stock counts (§10.6) | A count applies at the end of its day and resets the product's quantity. Missing stock is valued at WAC and reduces net profit as `stock_loss` (not when COGS is already estimated from purchases, which would double count). Surplus is flagged as a probable unrecorded purchase, never booked as profit. Counts are voided, never edited. |
 | Money accuracy | Stored as integer minor units (kobo). The API speaks decimal naira strings. |
 
 ## API overview (`/v1`)
@@ -77,12 +79,13 @@ tests/           API-level tests against real Postgres
   `PUT .../{iid}/mapping`, `PATCH .../{iid}/rows/{rid}`, `POST .../{iid}/commit`
 - Analytics: `GET /businesses/{id}/analytics/overview|trends|products|expenses|customers?start=&end=`,
   `GET .../analytics/inventory?as_of=&window_days=`
+- Stock counts: `POST /businesses/{id}/stock-counts` (several products at once),
+  `GET .../stock-counts`, `POST .../stock-counts/{cid}/void`
 - Intelligence: `GET /businesses/{id}/insights`, `GET .../health-score`, `GET .../dashboard`
   (all `?start=&end=`), `GET .../brief?week_ending=`
 
 ## Not built yet
 
-- Physical stock counts / adjustments (stock is currently derived from purchases and sales)
 - Inflation intelligence (needs an inflation data source)
 
 - AI layer: LLM extraction for images/receipts/voice/text and the AI Business Analyst

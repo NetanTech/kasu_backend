@@ -586,6 +586,83 @@ def _stock(s: Snapshot) -> list[Insight]:
     return out
 
 
+def _stock_counts(s: Snapshot) -> list[Insight]:
+    """What physical counts revealed: missing stock (shrinkage) and unexplained surplus."""
+    out = []
+    adjustments = s.view.adjustments_between(s.start, s.end)
+
+    def name(pid: uuid.UUID) -> str:
+        product = s.view.products.get(pid)
+        return product.name if product else "Unknown"
+
+    losses = [a for a in adjustments if a.variance_qty < 0]
+    if losses:
+        valued = [a for a in losses if a.value_minor is not None]
+        total = -sum((a.value_minor for a in valued), Decimal(0))
+        worst = sorted(valued, key=lambda a: a.value_minor)[:5]
+        revenue = Decimal(s.overview["revenue"]["value"])
+        share = pct(money(total), revenue) if revenue else None
+        out.append(
+            Insight(
+                code="stock_loss",
+                severity="warning",
+                title=(
+                    f"{naira(total)} of stock is unaccounted for"
+                    if total
+                    else "Stock counts found missing items"
+                ),
+                what_happened=(
+                    "Your stock count found less than your records show for "
+                    + ", ".join(
+                        f"{name(a.count.product_id)} ({abs(a.variance_qty.normalize())} missing)"
+                        for a in (worst or losses[:5])
+                    )
+                    + "."
+                ),
+                why="Common causes are unrecorded sales, spoilage or damage, items given out "
+                "on credit without a record, or theft.",
+                evidence={
+                    "missing_value": str(money(total)),
+                    "share_of_sales_pct": share,
+                    "items": [
+                        {
+                            "product": name(a.count.product_id),
+                            "counted_on": a.count.counted_on,
+                            "expected": str(a.expected_qty),
+                            "counted": str(a.count.counted_qty),
+                            "value": str(money(-a.value_minor)) if a.value_minor else None,
+                        }
+                        for a in losses
+                    ],
+                },
+                recommendation="Check that every sale is being recorded, and count these "
+                "items more often to see when the losses happen.",
+                potential_impact=(
+                    f"This reduced your profit by {naira(total)}."
+                    if total and s.overview["cost_of_goods_sold"]["method"] != "purchases_in_period"
+                    else None
+                ),
+            )
+        )
+    surplus = [a for a in adjustments if a.variance_qty > 0]
+    if surplus:
+        out.append(
+            Insight(
+                code="stock_surplus",
+                severity="info",
+                title="Some stock counts found more than your records",
+                what_happened=(
+                    "You have more on the shelf than recorded for "
+                    + ", ".join(name(a.count.product_id) for a in surplus[:5])
+                    + "."
+                ),
+                why="This usually means a purchase wasn't recorded.",
+                recommendation="Add any missing purchases so your costs and profit are right.",
+            )
+        )
+    return out
+
+
 def _customers(s: Snapshot) -> list[Insight]:
     out = []
     c = s.customers
@@ -676,6 +753,7 @@ RULES = (
     _expenses,
     _profit_and_cash,
     _stock,
+    _stock_counts,
     _customers,
     _data_quality,
 )

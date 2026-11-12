@@ -26,7 +26,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Counterparty, Product, Transaction
+from app.models import Counterparty, Product, StockCount, Transaction
 from app.models.enums import Settlement, TransactionKind, TransactionStatus
 from app.services.normalization import from_minor
 
@@ -47,16 +47,22 @@ class StockState:
 
     qty: Decimal = Decimal(0)  # estimated on hand
     cost_minor: Decimal = Decimal(0)  # total cost of qty on hand (WAC)
+    cost_known: bool = True  # False when counted stock had no purchase cost to value it at
     purchased_qty: Decimal = Decimal(0)
     sold_qty: Decimal = Decimal(0)
-    unrecorded_qty: Decimal = Decimal(0)  # sold beyond recorded purchases
+    unrecorded_qty: Decimal = Decimal(0)  # sold beyond recorded stock, all time
+    unrecorded_since_count: Decimal = Decimal(0)  # ... since the last physical count
+    last_unit_cost_minor: Decimal | None = None
     first_purchase: date | None = None
     last_purchase: date | None = None
     last_sale: date | None = None
+    last_count: date | None = None
 
     @property
     def avg_cost_minor(self) -> Decimal | None:
-        return self.cost_minor / self.qty if self.qty > 0 else None
+        if self.qty > 0 and self.cost_known:
+            return self.cost_minor / self.qty
+        return None
 
 
 @dataclass
@@ -65,16 +71,66 @@ class CostedSale:
     cogs_minor: Decimal | None  # None = no cost basis
 
 
-def walk(txns: list[Transaction]) -> tuple[list[CostedSale], dict[uuid.UUID, StockState]]:
-    """Walk the ledger in date order, maintaining weighted-average cost and stock per product."""
+@dataclass
+class StockAdjustment:
+    """The difference a physical count made to the ledger's estimate."""
+
+    count: StockCount
+    expected_qty: Decimal
+    variance_qty: Decimal  # counted - expected; negative = stock missing
+    value_minor: Decimal | None  # variance valued at average cost; None if cost unknown
+
+
+def walk(
+    txns: list[Transaction], counts: list[StockCount] | None = None
+) -> tuple[list[CostedSale], dict[uuid.UUID, StockState], list[StockAdjustment]]:
+    """Walk the ledger in date order, maintaining weighted-average cost and stock per product.
+
+    Physical counts apply at the end of their day: after every transaction dated that day.
+    """
     stock: dict[uuid.UUID, StockState] = defaultdict(StockState)
     costed: list[CostedSale] = []
+    adjustments: list[StockAdjustment] = []
+    pending = sorted(counts or [], key=lambda c: (c.counted_on, c.created_at))
+    next_count = 0
+
+    def apply_counts_before(day: date) -> None:
+        nonlocal next_count
+        while next_count < len(pending) and pending[next_count].counted_on < day:
+            c = pending[next_count]
+            next_count += 1
+            s = stock[c.product_id]
+            unit_cost = s.avg_cost_minor if s.avg_cost_minor is not None else s.last_unit_cost_minor
+            variance = c.counted_qty - s.qty
+            adjustments.append(
+                StockAdjustment(
+                    count=c,
+                    expected_qty=s.qty,
+                    variance_qty=variance,
+                    value_minor=variance * unit_cost if unit_cost is not None else None,
+                )
+            )
+            s.qty = c.counted_qty
+            if unit_cost is not None:
+                s.cost_minor, s.cost_known = c.counted_qty * unit_cost, True
+            else:
+                s.cost_minor, s.cost_known = Decimal(0), c.counted_qty == 0
+            s.unrecorded_since_count = Decimal(0)
+            s.last_count = c.counted_on
+
     for t in txns:
+        apply_counts_before(t.occurred_on)
         if t.kind == K.PURCHASE and t.product_id and t.quantity and t.quantity > 0:
             s = stock[t.product_id]
+            unit = Decimal(t.amount_minor) / t.quantity
+            if not s.cost_known and s.qty > 0:
+                # Counted stock with no known cost: best estimate is this purchase's unit cost.
+                s.cost_minor = s.qty * unit
+            s.cost_known = True
             s.qty += t.quantity
             s.cost_minor += Decimal(t.amount_minor)
             s.purchased_qty += t.quantity
+            s.last_unit_cost_minor = unit
             s.first_purchase = s.first_purchase or t.occurred_on
             s.last_purchase = t.occurred_on
         elif t.kind == K.SALE:
@@ -84,16 +140,21 @@ def walk(txns: list[Transaction]) -> tuple[list[CostedSale], dict[uuid.UUID, Sto
                 s.sold_qty += t.quantity
                 s.last_sale = t.occurred_on
                 if s.qty >= t.quantity:
-                    cogs = s.cost_minor / s.qty * t.quantity
+                    if s.cost_known:
+                        cogs = s.cost_minor / s.qty * t.quantity
+                        s.cost_minor -= cogs
                     s.qty -= t.quantity
-                    s.cost_minor -= cogs
                 else:
-                    # Selling more than we know was bought: cost basis incomplete.
-                    s.unrecorded_qty += t.quantity - s.qty
+                    # Selling more than we know we had: cost basis incomplete.
+                    short = t.quantity - s.qty
+                    s.unrecorded_qty += short
+                    s.unrecorded_since_count += short
                     s.qty = Decimal(0)
                     s.cost_minor = Decimal(0)
+                    s.cost_known = True
             costed.append(CostedSale(t, cogs))
-    return costed, dict(stock)
+    apply_counts_before(date.max)
+    return costed, dict(stock), adjustments
 
 
 def cost_sales(txns: list[Transaction]) -> list[CostedSale]:
@@ -131,7 +192,19 @@ class LedgerView:
                 .order_by(Transaction.occurred_on, Transaction.created_at)
             )
         )
-        self.costed, self.stock = walk(self.txns)
+        self.counts: list[StockCount] = list(
+            db.scalars(
+                select(StockCount).where(
+                    StockCount.business_id == business_id,
+                    StockCount.counted_on <= until,
+                    StockCount.voided_at.is_(None),
+                )
+            )
+        )
+        self.costed, self.stock, self.adjustments = walk(self.txns, self.counts)
+
+    def adjustments_between(self, start: date, end: date) -> list[StockAdjustment]:
+        return [a for a in self.adjustments if start <= a.count.counted_on <= end]
 
     def between(self, start: date, end: date) -> list[Transaction]:
         return [t for t in self.txns if start <= t.occurred_on <= end]
@@ -251,6 +324,9 @@ class Totals:
     contributions: Decimal = Decimal(0)
     cash_in: Decimal = Decimal(0)
     cash_out: Decimal = Decimal(0)
+    stock_loss: Decimal = Decimal(0)  # value of stock found missing at physical counts
+    unvalued_losses: int = 0  # missing stock we couldn't put a cost on
+    surpluses: int = 0  # counts that found more than the records show
     count: int = 0
 
 
@@ -295,6 +371,15 @@ def period_totals(view: LedgerView, start: date, end: date) -> Totals:
                 t.cash_in += amt
             case K.SUPPLIER_PAYMENT:
                 t.cash_out += amt
+    for adj in view.adjustments_between(start, end):
+        if adj.variance_qty < 0:
+            if adj.value_minor is None:
+                t.unvalued_losses += 1
+            else:
+                t.stock_loss += -adj.value_minor
+        elif adj.variance_qty > 0:
+            # Usually an unrecorded purchase, so it is *not* booked as profit.
+            t.surpluses += 1
     return t
 
 
@@ -306,6 +391,7 @@ class Profit:
     method: str
     basis: Basis
     coverage: Decimal
+    stock_loss: Decimal = Decimal(0)  # the loss actually deducted from net profit
 
 
 def profit(t: Totals, conf: Confidence | None = None) -> Profit:
@@ -337,7 +423,22 @@ def profit(t: Totals, conf: Confidence | None = None) -> Profit:
                 "purchases to see real profit.",
             )
     gross = t.revenue - cogs
-    return Profit(cogs, gross, gross + t.other_income - t.opex, method, basis, coverage)
+    # Missing stock is a real cost. When COGS was approximated by total purchases, the lost
+    # goods are already inside that number, so deducting them again would double count.
+    loss = Decimal(0) if method == "purchases_in_period" else t.stock_loss
+    if conf and t.unvalued_losses:
+        conf.lower(
+            "medium",
+            f"{t.unvalued_losses} stock count(s) found missing items we couldn't put a cost on, "
+            "so the loss isn't included in profit.",
+        )
+    if conf and t.surpluses:
+        conf.reasons.append(
+            f"{t.surpluses} stock count(s) found more stock than your records show. Some "
+            "purchases may not have been recorded."
+        )
+    net = gross + t.other_income - t.opex - loss
+    return Profit(cogs, gross, net, method, basis, coverage, loss)
 
 
 def receivables_payables(view: LedgerView, end: date) -> tuple[Decimal, Decimal]:
@@ -395,6 +496,7 @@ def overview_from(view: LedgerView, start: date, end: date) -> dict:
         "gross_margin_pct": pct(p.gross, cur.revenue),
         "operating_expenses": _m(cur.opex).as_dict(),
         "other_income": _m(cur.other_income).as_dict(),
+        "stock_loss": _m(p.stock_loss).as_dict(),
         "net_profit": _m(p.net, p.basis).as_dict(),
         "cash_in": _m(cur.cash_in).as_dict(),
         "cash_out": _m(cur.cash_out).as_dict(),

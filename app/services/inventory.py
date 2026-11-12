@@ -25,6 +25,7 @@ REORDER_WHEN_DAYS_LEFT = 7
 REORDER_COVER_DAYS = 14
 SLOW_WHEN_DAYS_LEFT = 90
 DEAD_AFTER_DAYS = 60
+COUNT_FRESH_DAYS = 30
 
 
 @dataclass
@@ -45,9 +46,21 @@ class ProductStock:
     movement: Movement
     last_sale: date | None
     last_purchase: date | None
+    last_counted: date | None
     unrecorded_qty: Decimal
     reorder_qty: Decimal | None
     reorder_cost_minor: Decimal | None
+
+    as_of: date | None = None
+
+    @property
+    def stock_basis(self) -> str:
+        fresh = (
+            self.last_counted is not None
+            and self.as_of is not None
+            and (self.as_of - self.last_counted).days <= COUNT_FRESH_DAYS
+        )
+        return "counted" if fresh and self.unrecorded_qty == 0 else "estimated"
 
     def as_dict(self) -> dict:
         return {
@@ -69,7 +82,11 @@ class ProductStock:
             "movement": self.movement,
             "last_sale": self.last_sale,
             "last_purchase": self.last_purchase,
-            "sold_beyond_recorded_purchases": str(self.unrecorded_qty),
+            "last_counted_on": self.last_counted,
+            # "counted" = anchored on a physical count within COUNT_FRESH_DAYS, then adjusted
+            # by recorded sales/purchases since; "estimated" = derived from records only.
+            "stock_basis": self.stock_basis,
+            "sold_beyond_recorded_stock": str(self.unrecorded_qty),
             "reorder": (
                 {
                     "suggested_quantity": str(self.reorder_qty),
@@ -86,14 +103,14 @@ class ProductStock:
 
 def _status(
     s_qty: Decimal,
-    purchased: Decimal,
+    known: bool,
     days_left: Decimal | None,
     daily: Decimal,
     last_sale: date | None,
     first_purchase: date | None,
     as_of: date,
 ) -> StockStatus:
-    if purchased == 0:
+    if not known:
         return "unknown"  # only sales recorded; we can't know what's on the shelf
     if s_qty <= 0:
         return "out_of_stock"
@@ -137,10 +154,9 @@ def inventory_from(
         if first_activity and first_activity > window_start:
             effective_days = max((as_of - first_activity).days + 1, 1)
         daily = sold[pid] / effective_days
-        days_left = s.qty / daily if daily > 0 and s.purchased_qty > 0 else None
-        status = _status(
-            s.qty, s.purchased_qty, days_left, daily, s.last_sale, s.first_purchase, as_of
-        )
+        known = s.purchased_qty > 0 or s.last_count is not None
+        days_left = s.qty / daily if daily > 0 and known else None
+        status = _status(s.qty, known, days_left, daily, s.last_sale, s.first_purchase, as_of)
 
         reorder_qty = reorder_cost = None
         if status in ("low", "out_of_stock") and daily > 0:
@@ -169,7 +185,8 @@ def inventory_from(
                 movement="none",
                 last_sale=s.last_sale,
                 last_purchase=s.last_purchase,
-                unrecorded_qty=s.unrecorded_qty,
+                last_counted=s.last_count,
+                unrecorded_qty=s.unrecorded_since_count,
                 reorder_qty=reorder_qty,
                 reorder_cost_minor=reorder_cost,
             )
@@ -192,22 +209,27 @@ def inventory_from(
                 item.movement = "normal"
 
     conf = Confidence()
-    conf.reasons.append(
-        "Stock levels are estimated from recorded purchases and sales, not physical counts."
-    )
+    for i in items:
+        i.as_of = as_of
+    uncounted = [i for i in items if i.stock_basis != "counted"]
+    if uncounted:
+        conf.reasons.append(
+            f"Stock for {len(uncounted)} of {len(items)} product(s) is estimated from recorded "
+            f"purchases and sales, with no physical count in the last {COUNT_FRESH_DAYS} days."
+        )
     oversold = [i.name for i in items if i.unrecorded_qty > 0]
     if oversold:
         conf.lower(
             "medium",
             f"More was sold than recorded as bought for: {', '.join(sorted(oversold)[:5])}. "
-            "Some purchases may be missing, so stock for these may be off.",
+            "Some purchases may be missing; a stock count will fix the estimate.",
         )
     unknown = [i for i in items if i.status == "unknown"]
     if unknown:
         conf.lower(
             "medium",
-            f"{len(unknown)} product(s) have sales but no recorded purchases, so their stock "
-            "can't be estimated.",
+            f"{len(unknown)} product(s) have sales but no recorded purchases or stock count, "
+            "so their stock can't be estimated.",
         )
     if not items:
         conf.lower("low", "No product quantities recorded yet.")
@@ -236,8 +258,15 @@ def inventory_from(
             # How many days current stock lasts at the window's cost-of-sales pace.
             "days_of_inventory": str(days_of_inventory) if days_of_inventory else None,
             "products_tracked": len(items),
+            "products_counted_recently": sum(1 for i in items if i.stock_basis == "counted"),
+            # Fast-moving products without a recent count: the ones most worth counting.
+            "count_suggested": [
+                i.name for i in items if i.movement == "fast" and i.stock_basis != "counted"
+            ],
             "by_status": dict(counts),
-            "basis": "estimated",
+            "basis": "counted"
+            if items and all(i.stock_basis == "counted" for i in items)
+            else "estimated",
         },
         "products": [i.as_dict() for i in items],
         "confidence": conf.as_dict(),
