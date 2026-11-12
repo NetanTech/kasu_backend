@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import jwt
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.security import decode_token
 from app.models import Business, BusinessMember, User
-from app.models.enums import MemberRole
+from app.models.enums import ROLE_PERMISSIONS, MemberRole, Permission
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -48,6 +49,9 @@ class BusinessContext:
     def id(self) -> uuid.UUID:
         return self.business.id
 
+    def can(self, permission: Permission) -> bool:
+        return permission in ROLE_PERMISSIONS[self.role]
+
 
 def get_business(
     business_id: uuid.UUID,
@@ -65,7 +69,15 @@ def get_business(
     return BusinessContext(business=row[0], user=user, role=row[1])
 
 
-def require_admin(ctx: BusinessContext = Depends(get_business)) -> BusinessContext:
-    if ctx.role not in (MemberRole.OWNER, MemberRole.ADMIN):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only owners and admins can do this")
-    return ctx
+def require(permission: Permission) -> Callable[..., BusinessContext]:
+    """Dependency factory: the caller must be a member *and* have `permission`."""
+
+    def dependency(ctx: BusinessContext = Depends(get_business)) -> BusinessContext:
+        if not ctx.can(permission):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Your role ({ctx.role.value}) can't do this",
+            )
+        return ctx
+
+    return dependency

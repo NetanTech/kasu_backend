@@ -4,8 +4,9 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import BusinessContext, get_business
+from app.api.deps import BusinessContext, require
 from app.core.db import get_db
+from app.models.enums import Permission
 from app.services import analytics
 from app.services.customers import customers_from
 from app.services.intelligence import build_snapshot, health_from, insights_from
@@ -34,7 +35,7 @@ def overview(
     start: date | None = None,
     end: date | None = None,
     include_provisional: bool = False,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     """Revenue, profit, cash flow and business-vs-personal for a period, with confidence."""
@@ -51,7 +52,7 @@ def trends(
     end: date | None = None,
     granularity: Literal["day", "week", "month"] = "month",
     include_provisional: bool = False,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     if start is None:
@@ -73,7 +74,7 @@ def products(
     start: date | None = None,
     end: date | None = None,
     include_provisional: bool = False,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     s, e = _range(start, end)
@@ -88,7 +89,7 @@ def expenses(
     start: date | None = None,
     end: date | None = None,
     include_provisional: bool = Query(default=False),
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     s, e = _range(start, end)
@@ -102,7 +103,7 @@ def expenses(
 def inventory(
     as_of: date | None = None,
     window_days: int = Query(default=30, ge=7, le=180),
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     """Estimated stock, days of stock left, fast/slow/dead stock and reorder suggestions."""
@@ -115,7 +116,7 @@ def inventory(
 def customers(
     start: date | None = None,
     end: date | None = None,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     """New vs returning, top customers, dormant customers, concentration and who owes you."""
@@ -132,7 +133,7 @@ def insights(
     start: date | None = None,
     end: date | None = None,
     include_provisional: bool = False,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     """Alerts and recommendations: what happened, why, evidence, what to consider."""
@@ -149,7 +150,7 @@ def health_score(
     start: date | None = None,
     end: date | None = None,
     include_provisional: bool = False,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     s, e = _range(start, end)
@@ -161,7 +162,7 @@ def health_score(
 def brief(
     week_ending: date | None = None,
     include_provisional: bool = False,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     """Weekly Business Brief: the 7 days ending `week_ending` (default today)."""
@@ -178,7 +179,7 @@ def dashboard_view(
     start: date | None = None,
     end: date | None = None,
     include_provisional: bool = False,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
     db: Session = Depends(get_db),
 ) -> dict:
     """Everything the main dashboard needs in one call (PRD §21)."""

@@ -6,11 +6,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import BusinessContext, get_business
+from app.api.deps import BusinessContext, get_business, require
 from app.core.db import get_db
 from app.models import Counterparty, Product, Transaction, TransactionEvent
 from app.models.enums import (
     CounterpartyKind,
+    Permission,
     TransactionKind,
     TransactionSource,
     TransactionStatus,
@@ -45,12 +46,31 @@ def _out(txn: Transaction) -> TransactionOut:
     return out
 
 
-def _get(db: Session, ctx: BusinessContext, txn_id: uuid.UUID) -> Transaction:
-    txn = db.scalar(
+# The owner's personal money movements. Staff without VIEW_PERSONAL never see these.
+PERSONAL_KINDS = (
+    TransactionKind.PERSONAL_EXPENSE,
+    TransactionKind.OWNER_WITHDRAWAL,
+    TransactionKind.OWNER_CONTRIBUTION,
+)
+
+
+def _visible(stmt, ctx: BusinessContext):
+    if not ctx.can(Permission.VIEW_PERSONAL):
+        stmt = stmt.where(Transaction.kind.not_in(PERSONAL_KINDS))
+    return stmt
+
+
+def _get(
+    db: Session, ctx: BusinessContext, txn_id: uuid.UUID, *, own_record: bool = False
+) -> Transaction:
+    stmt = (
         select(Transaction)
         .options(selectinload(Transaction.product), selectinload(Transaction.counterparty))
         .where(Transaction.id == txn_id, Transaction.business_id == ctx.id)
     )
+    # Staff can record e.g. "owner took ₦5,000 from the till" and get it back once, but
+    # can't browse, correct or void the owner's personal records afterwards.
+    txn = db.scalar(stmt if own_record else _visible(stmt, ctx))
     if txn is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Transaction not found")
     return txn
@@ -67,7 +87,7 @@ def _check_product(db: Session, ctx: BusinessContext, product_id: uuid.UUID) -> 
 def create_transaction(
     body: TransactionCreate,
     response: Response,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> TransactionOut:
     if body.client_ref:
@@ -133,7 +153,7 @@ def create_transaction(
             raise
         response.status_code = status.HTTP_200_OK
         return _out(existing)
-    return _out(_get(db, ctx, txn.id))
+    return _out(_get(db, ctx, txn.id, own_record=True))
 
 
 @router.get("", response_model=TransactionPage)
@@ -149,7 +169,7 @@ def list_transactions(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> TransactionPage:
-    stmt = select(Transaction).where(Transaction.business_id == ctx.id)
+    stmt = _visible(select(Transaction).where(Transaction.business_id == ctx.id), ctx)
     if start:
         stmt = stmt.where(Transaction.occurred_on >= start)
     if end:
@@ -199,7 +219,7 @@ def get_transaction(
 def correct_transaction(
     transaction_id: uuid.UUID,
     body: TransactionCorrect,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> TransactionOut:
     """Correct a transaction. The previous version is preserved in its event history."""
@@ -233,7 +253,7 @@ def correct_transaction(
 @router.post("/{transaction_id}/confirm", response_model=TransactionOut)
 def confirm_transaction(
     transaction_id: uuid.UUID,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> TransactionOut:
     txn = _get(db, ctx, transaction_id)
@@ -250,7 +270,7 @@ def confirm_transaction(
 def void_transaction(
     transaction_id: uuid.UUID,
     body: VoidIn,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> TransactionOut:
     """Retract a transaction. It stays in the audit trail but no longer counts anywhere."""

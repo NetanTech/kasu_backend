@@ -4,11 +4,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import BusinessContext, get_business
+from app.api.deps import BusinessContext, get_business, require
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.models import ImportBatch, ImportRow
-from app.models.enums import TransactionKind
+from app.models.enums import Permission, TransactionKind
 from app.schemas.imports import (
     CommitIn,
     ImportDetailOut,
@@ -43,7 +43,7 @@ async def upload(
         default=None,
         description="What the rows are when the file doesn't say, e.g. 'sale' for a sales log",
     ),
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> ImportBatch:
     """Upload an Excel/CSV file. Rows are staged for review; nothing is in the ledger yet."""
@@ -103,7 +103,7 @@ def get_import(
 def remap(
     import_id: uuid.UUID,
     body: RemapIn,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> ImportBatch:
     bad = set(body.column_mapping) - set(FIELDS)
@@ -127,7 +127,7 @@ def update_row(
     import_id: uuid.UUID,
     row_id: uuid.UUID,
     body: RowUpdateIn,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> ImportRow:
     """Answer KASU's questions about a row: fix values, skip it, or accept a flagged guess."""
@@ -150,7 +150,7 @@ def update_row(
 def commit(
     import_id: uuid.UUID,
     body: CommitIn | None = None,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> ImportBatch:
     batch = _get(db, ctx, import_id)

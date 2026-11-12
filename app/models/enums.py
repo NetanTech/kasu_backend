@@ -2,9 +2,41 @@ from enum import StrEnum
 
 
 class MemberRole(StrEnum):
-    OWNER = "owner"
-    ADMIN = "admin"
-    MEMBER = "member"
+    OWNER = "owner"  # everything, including business settings and the whole team
+    ADMIN = "admin"  # manager: all data and analytics; manages members and viewers
+    MEMBER = "member"  # staff: records sales, purchases, imports, stock counts
+    VIEWER = "viewer"  # accountant/advisor: read-only, including analytics
+
+
+class Permission(StrEnum):
+    RECORD = "record"  # create/correct transactions, imports, stock counts, products
+    VIEW_FINANCIALS = "view_financials"  # analytics, insights, health score, brief, dashboard
+    VIEW_PERSONAL = "view_personal"  # owner's personal expenses, withdrawals, contributions
+    MANAGE_TEAM = "manage_team"  # invite, change roles, remove people
+    MANAGE_BUSINESS = "manage_business"  # business settings, ownership transfer
+
+
+ROLE_PERMISSIONS: dict[MemberRole, frozenset[Permission]] = {
+    MemberRole.OWNER: frozenset(Permission),
+    MemberRole.ADMIN: frozenset(
+        {
+            Permission.RECORD,
+            Permission.VIEW_FINANCIALS,
+            Permission.VIEW_PERSONAL,
+            Permission.MANAGE_TEAM,
+        }
+    ),
+    MemberRole.MEMBER: frozenset({Permission.RECORD}),
+    MemberRole.VIEWER: frozenset({Permission.VIEW_FINANCIALS, Permission.VIEW_PERSONAL}),
+}
+
+# Roles each role may grant, change or remove. Ownership only moves via transfer.
+MANAGEABLE_ROLES: dict[MemberRole, frozenset[MemberRole]] = {
+    MemberRole.OWNER: frozenset({MemberRole.ADMIN, MemberRole.MEMBER, MemberRole.VIEWER}),
+    MemberRole.ADMIN: frozenset({MemberRole.MEMBER, MemberRole.VIEWER}),
+    MemberRole.MEMBER: frozenset(),
+    MemberRole.VIEWER: frozenset(),
+}
 
 
 class TransactionKind(StrEnum):

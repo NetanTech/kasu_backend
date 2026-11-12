@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import BusinessContext, get_business
+from app.api.deps import BusinessContext, get_business, require
 from app.core.db import get_db
 from app.models import StockCount
+from app.models.enums import Permission
 from app.schemas.stock import StockCountIn, StockCountOut, VoidCountIn
 from app.services.analytics import LedgerView
 from app.services.stock_counts import CountError, CountItem, describe, record_counts, void_count
@@ -23,7 +24,7 @@ def _view(db: Session, ctx: BusinessContext, counts: list[StockCount]) -> Ledger
 @router.post("", response_model=list[StockCountOut], status_code=status.HTTP_201_CREATED)
 def create_counts(
     body: StockCountIn,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     """Record what's physically on the shelf. Returns the difference from your records."""
@@ -70,7 +71,7 @@ def list_counts(
 def void(
     count_id: uuid.UUID,
     body: VoidCountIn,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> dict:
     """Retract a wrong count. It stays in history but no longer affects stock or profit."""

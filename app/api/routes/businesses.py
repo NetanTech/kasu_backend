@@ -5,10 +5,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import BusinessContext, get_business, get_current_user, require_admin
+from app.api.deps import BusinessContext, get_business, get_current_user, require
 from app.core.db import get_db
 from app.models import Business, BusinessMember, Product, ProductAlias, User
-from app.models.enums import MemberRole
+from app.models.enums import MemberRole, Permission
 from app.schemas.business import (
     AliasIn,
     BusinessCreate,
@@ -67,7 +67,7 @@ def get_business_detail(ctx: BusinessContext = Depends(get_business)) -> Busines
 @router.patch("/{business_id}", response_model=BusinessOut)
 def update_business(
     body: BusinessUpdate,
-    ctx: BusinessContext = Depends(require_admin),
+    ctx: BusinessContext = Depends(require(Permission.MANAGE_BUSINESS)),
     db: Session = Depends(get_db),
 ) -> BusinessOut:
     for name, value in body.model_dump(exclude_unset=True).items():
@@ -101,7 +101,7 @@ def _product(db: Session, ctx: BusinessContext, product_id: uuid.UUID) -> Produc
 def update_product(
     product_id: uuid.UUID,
     body: ProductUpdate,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> Product:
     product = _product(db, ctx, product_id)
@@ -125,7 +125,7 @@ def update_product(
 def add_alias(
     product_id: uuid.UUID,
     body: AliasIn,
-    ctx: BusinessContext = Depends(get_business),
+    ctx: BusinessContext = Depends(require(Permission.RECORD)),
     db: Session = Depends(get_db),
 ) -> list[str]:
     """Teach KASU that another spelling ("one bag rice") means this product."""

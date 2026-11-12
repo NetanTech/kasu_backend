@@ -21,6 +21,10 @@ class Settings(BaseSettings):
 
     default_currency: str = "NGN"
 
+    # Frontend base URL used to build shareable invite links: {app_url}/invite/{token}
+    app_url: str = "http://localhost:3000"
+    invite_days: int = 7
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"

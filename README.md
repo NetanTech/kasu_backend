@@ -44,6 +44,7 @@ app/
                        trends, product performance, expense breakdown
     inventory.py       stock (counted or estimated), days left, fast/slow/dead stock, reorder
     stock_counts.py    physical stock counts: record, void, live variance vs records
+    team.py            invitations, roles, removal, ownership transfer, audit log
     customers.py       new vs returning, top/dormant customers, concentration, who owes you
     intelligence.py    rule-based insights (what happened / why / evidence / what to do) and
                        the Business Health Score
@@ -66,12 +67,18 @@ tests/           API-level tests against real Postgres
 | Offline sync (§7.4) | `client_ref` is unique per business. Re-sending returns the original transaction (200) instead of duplicating. |
 | Explainable intelligence (§15–17) | Insights are deterministic rules with tunable thresholds at the top of `intelligence.py`. Each carries evidence and a confidence. Health Score dimensions without enough data are *skipped*, not scored zero, and the response states what share of the score is backed by data. Inflation isn't faked. |
 | Physical stock counts (§10.6) | A count applies at the end of its day and resets the product's quantity. Missing stock is valued at WAC and reduces net profit as `stock_loss` (not when COGS is already estimated from purchases, which would double count). Surplus is flagged as a probable unrecorded purchase, never booked as profit. Counts are voided, never edited. |
+| Roles & permissions | Owner (everything), admin (all data + manages staff/viewers), member (records sales, imports, stock counts; no profit/analytics; never sees the owner's personal withdrawals or expenses), viewer (read-only incl. analytics, e.g. an accountant). One table in `models/enums.py`; routes declare `require(Permission.X)`. |
+| Invitations | Shareable link (no email service yet). Only a SHA-256 of the token is stored. Accepting needs the token *and* a login with the invited email. Single use, expires after 7 days, re-inviting replaces the old link. Team changes are written to `audit_events`. |
 | Money accuracy | Stored as integer minor units (kobo). The API speaks decimal naira strings. |
 
 ## API overview (`/v1`)
 
 - `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me`
 - `POST/GET /businesses`, `GET/PATCH /businesses/{id}`
+- Team: `GET /businesses/{id}/members`, `PATCH|DELETE .../members/{uid}`,
+  `POST .../transfer-ownership`, `POST|GET .../invitations`, `POST .../invitations/{iid}/revoke`,
+  `GET .../audit-log`, `GET .../me/access`; invitee side: `POST /invitations/preview`,
+  `POST /invitations/accept`
 - `GET /businesses/{id}/products`, `PATCH .../products/{pid}`, `POST .../products/{pid}/aliases`
 - Transactions: `POST/GET /businesses/{id}/transactions`, `GET/PATCH .../{tid}`,
   `POST .../{tid}/confirm`, `POST .../{tid}/void`, `GET .../{tid}/history`
@@ -92,4 +99,4 @@ tests/           API-level tests against real Postgres
 - Background worker for long-running extraction (CSV/Excel parse inline for now)
 - S3-compatible object storage (uploads go to local disk via `services/storage.py`)
 - Postgres row-level security as a second line of tenant isolation
-- Phone/OTP login, member invitations, rate limiting, data export/deletion endpoints
+- Phone/OTP login, email verification and invite emails, rate limiting, data export/deletion
