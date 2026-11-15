@@ -1,0 +1,4 @@
+# Keep LF line endings in the repo regardless of OS (scripts run inside Linux containers).
+* text=auto eol=lf
+*.xlsx binary
+*.xls binary
