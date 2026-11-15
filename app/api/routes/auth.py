@@ -8,6 +8,7 @@ from app.core.db import get_db
 from app.core.security import create_token, decode_token, hash_password, verify_password
 from app.models import User
 from app.schemas.auth import LoginIn, RefreshIn, RegisterIn, TokenOut, UserOut
+from app.services.security import AccessDenied
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -39,7 +40,13 @@ def register(body: RegisterIn, db: Session = Depends(get_db)) -> TokenOut:
 def login(body: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
     user = db.scalar(select(User).where(func.lower(User.email) == body.email.lower()))
     if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect email or password")
+        raise AccessDenied(
+            status.HTTP_401_UNAUTHORIZED,
+            "Incorrect email or password",
+            reason="login_failed",
+            user_id=user.id if user else None,
+            details={"email": body.email.lower()},
+        )
     return _tokens(user)
 
 
@@ -48,10 +55,17 @@ def refresh(body: RefreshIn, db: Session = Depends(get_db)) -> TokenOut:
     try:
         user_id = decode_token(body.refresh_token, "refresh")
     except jwt.InvalidTokenError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token") from None
+        raise AccessDenied(
+            status.HTTP_401_UNAUTHORIZED, "Invalid refresh token", reason="invalid_token"
+        ) from None
     user = db.get(User, user_id)
     if user is None or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
+        raise AccessDenied(
+            status.HTTP_401_UNAUTHORIZED,
+            "Invalid refresh token",
+            reason="inactive_user" if user else "invalid_token",
+            user_id=user.id if user else None,
+        )
     return _tokens(user)
 
 

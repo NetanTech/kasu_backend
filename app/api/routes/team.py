@@ -4,13 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import BusinessContext, get_business, get_current_user, require
+from app.api.deps import BusinessContext, forbidden, get_business, get_current_user, require
 from app.core.db import get_db
-from app.models import AuditEvent, BusinessMember, Invitation, User
+from app.models import AccessDenial, AuditEvent, BusinessMember, Invitation, User
 from app.models.enums import ROLE_PERMISSIONS, Permission
 from app.schemas.business import BusinessOut
 from app.schemas.team import (
     AcceptIn,
+    AccessDenialOut,
     AuditEventOut,
     InvitationCreate,
     InvitationCreated,
@@ -22,14 +23,26 @@ from app.schemas.team import (
     TransferIn,
 )
 from app.services import team
+from app.services.security import AccessDenied
 from app.services.team import TeamError
 
 router = APIRouter(prefix="/businesses/{business_id}", tags=["team"])
 public_router = APIRouter(prefix="/invitations", tags=["team"])
 
 
-def _fail(db: Session, exc: TeamError):
+def _fail(
+    db: Session, exc: TeamError, ctx: BusinessContext | None = None, user: User | None = None
+):
     db.rollback()
+    if exc.status_code == status.HTTP_403_FORBIDDEN:
+        actor = ctx.user if ctx else user
+        raise AccessDenied(
+            exc.status_code,
+            str(exc),
+            reason="team_rule",
+            user_id=actor.id if actor else None,
+            business_id=ctx.id if ctx else None,
+        ) from None
     raise HTTPException(exc.status_code, str(exc)) from None
 
 
@@ -76,7 +89,7 @@ def change_role(
         member = team.change_role(db, ctx.id, ctx.user, ctx.role, user_id, body.role)
         db.commit()
     except TeamError as exc:
-        _fail(db, exc)
+        _fail(db, exc, ctx)
     user = db.get(User, user_id)
     return MemberOut(
         user_id=user.id,
@@ -96,14 +109,12 @@ def remove_member(
 ) -> Response:
     """Remove someone (needs manage_team), or remove yourself to leave the business."""
     if user_id != ctx.user.id and not ctx.can(Permission.MANAGE_TEAM):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, f"Your role ({ctx.role.value}) can't do this"
-        )
+        raise forbidden(ctx, Permission.MANAGE_TEAM)
     try:
         team.remove_member(db, ctx.id, ctx.user, ctx.role, user_id)
         db.commit()
     except TeamError as exc:
-        _fail(db, exc)
+        _fail(db, exc, ctx)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -118,7 +129,7 @@ def transfer_ownership(
         team.transfer_ownership(db, ctx.id, ctx.user, body.user_id)
         db.commit()
     except TeamError as exc:
-        _fail(db, exc)
+        _fail(db, exc, ctx)
     return list_members(ctx, db)
 
 
@@ -133,6 +144,24 @@ def audit_log(
             select(AuditEvent)
             .where(AuditEvent.business_id == ctx.id)
             .order_by(AuditEvent.created_at.desc())
+            .limit(limit)
+        )
+    )
+
+
+@router.get("/access-denials", response_model=list[AccessDenialOut])
+def access_denials(
+    limit: int = Query(default=100, ge=1, le=500),
+    ctx: BusinessContext = Depends(require(Permission.MANAGE_TEAM)),
+    db: Session = Depends(get_db),
+) -> list[AccessDenial]:
+    """Requests to this business that were refused: outsiders probing it, or team members
+    trying something their role doesn't allow. Newest first."""
+    return list(
+        db.scalars(
+            select(AccessDenial)
+            .where(AccessDenial.business_id == ctx.id)
+            .order_by(AccessDenial.created_at.desc())
             .limit(limit)
         )
     )
@@ -154,7 +183,7 @@ def create_invitation(
         )
         db.commit()
     except TeamError as exc:
-        _fail(db, exc)
+        _fail(db, exc, ctx)
     return InvitationCreated(
         **InvitationOut.model_validate(invitation).model_dump(),
         token=token,
@@ -189,7 +218,7 @@ def revoke_invitation(
         team.revoke_invitation(db, invitation, ctx.user, ctx.role)
         db.commit()
     except TeamError as exc:
-        _fail(db, exc)
+        _fail(db, exc, ctx)
     return invitation
 
 
@@ -224,6 +253,6 @@ def accept_invitation(
         member = team.accept_invitation(db, body.token, user)
         db.commit()
     except TeamError as exc:
-        _fail(db, exc)
+        _fail(db, exc, user=user)
     business = member.business
     return BusinessOut.model_validate({**business.__dict__, "role": member.role})

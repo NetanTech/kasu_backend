@@ -120,3 +120,12 @@ class ImportRowStatus(StrEnum):
     SKIPPED = "skipped"  # user chose not to import
     COMMITTED = "committed"
     UNRESOLVED = "unresolved"  # could not be turned into a transaction (PRD §7.1)
+
+
+class BriefStatus(StrEnum):
+    READY = "ready"
+    INSUFFICIENT_DATA = "insufficient_data"  # the brief is a prompt to add more records
+
+
+class NotificationKind(StrEnum):
+    WEEKLY_BRIEF = "weekly_brief"

@@ -85,7 +85,7 @@ def list_imports(
 
 
 @router.get("/fields", response_model=list[str])
-def mappable_fields() -> tuple[str, ...]:
+def mappable_fields(_: BusinessContext = Depends(get_business)) -> tuple[str, ...]:
     """Canonical fields a column can be mapped to."""
     return FIELDS
 

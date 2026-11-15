@@ -14,8 +14,11 @@ from dateutil import parser as date_parser
 _WS = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s]")
 
-_CURRENCY_MARKERS = re.compile(r"(₦|ngn|naira|n(?=\d))", re.IGNORECASE)
+# "#" is widely typed for ₦ on keyboards without the naira sign.
+_CURRENCY_MARKERS = re.compile(r"(₦|#|ngn|naira|n(?=\d))", re.IGNORECASE)
 _MULTIPLIERS = {"k": Decimal(1_000), "m": Decimal(1_000_000)}
+
+_YEAR_FIRST = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:$|[ T])")
 
 # Excel stores dates as days since 1899-12-30 (with the 1900 leap-year bug baked in).
 _EXCEL_EPOCH = date(1899, 12, 30)
@@ -64,7 +67,8 @@ def parse_amount(raw: object) -> Parsed[Decimal]:
 
     text = str(raw).strip().lower()
     text = _CURRENCY_MARKERS.sub("", text)
-    text = text.replace(",", "").replace(" ", "").strip("()-+")
+    # "(2,500)" is accounting-style negative; "5,000/-" is a common way to close an amount.
+    text = text.replace(",", "").replace(" ", "").strip("()-+/")
     multiplier = Decimal(1)
     if text and text[-1] in _MULTIPLIERS:
         multiplier = _MULTIPLIERS[text[-1]]
@@ -76,15 +80,35 @@ def parse_amount(raw: object) -> Parsed[Decimal]:
     return Parsed(abs(value).quantize(Decimal("0.01")))
 
 
+_UNICODE_FRACTIONS = {"½": " 1/2", "¼": " 1/4", "¾": " 3/4", "⅓": " 1/3", "⅔": " 2/3"}
+# "2 bags", "2.5kg", "1/2 bag", "1 1/2 bags" (after "1½" -> "1 1/2")
+_QUANTITY = re.compile(r"^\s*(?:(\d+)\s+(\d+)/(\d+)|(\d+)/(\d+)|(\d+(?:\.\d+)?))")
+
+
+def _plain(value: Decimal) -> Decimal:
+    """Drop trailing zeros without switching to exponent form (10, not 1E+1)."""
+    return value.quantize(Decimal(1)) if value == value.to_integral() else value.normalize()
+
+
 def parse_quantity(raw: object) -> Parsed[Decimal]:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return Parsed(None)
     if isinstance(raw, int | float | Decimal) and not isinstance(raw, bool):
         return Parsed(Decimal(str(raw)))
-    match = re.match(r"^\s*(\d+(?:\.\d+)?)", str(raw))
+    text = str(raw)
+    for symbol, fraction in _UNICODE_FRACTIONS.items():
+        text = text.replace(symbol, fraction)
+    match = _QUANTITY.match(text)
     if not match:
         return Parsed(None, f"Could not read '{raw}' as a quantity")
-    return Parsed(Decimal(match.group(1)))
+    whole, num, den, f_num, f_den, plain = match.groups()
+    if plain is not None:
+        return Parsed(Decimal(plain))
+    num, den = (num, den) if whole is not None else (f_num, f_den)
+    if int(den) == 0:
+        return Parsed(None, f"Could not read '{raw}' as a quantity")
+    fraction = (Decimal(num) / Decimal(den)).quantize(Decimal("0.0001"))
+    return Parsed(_plain(Decimal(whole or 0) + fraction))
 
 
 def parse_date(raw: object) -> Parsed[date]:
@@ -101,11 +125,14 @@ def parse_date(raw: object) -> Parsed[date]:
             return Parsed(_EXCEL_EPOCH + timedelta(days=int(raw)))
         return Parsed(None, f"'{raw}' is not a date")
     text = str(raw).strip()
-    try:
-        # ISO (YYYY-MM-DD) is unambiguous; dayfirst would wrongly swap its month and day.
-        return Parsed(date.fromisoformat(text[:10]))
-    except ValueError:
-        pass
+    # Year first (2026-11-04, 2026/11/04, 2026.11.04) is always year-month-day; dayfirst
+    # would wrongly read 2026/11/04 as 11 April.
+    year_first = _YEAR_FIRST.match(text)
+    if year_first:
+        try:
+            return Parsed(date(*(int(g) for g in year_first.groups())))
+        except ValueError:
+            return Parsed(None, f"Could not read '{raw}' as a date")
     try:
         return Parsed(date_parser.parse(text, dayfirst=True).date())
     except (ValueError, OverflowError):

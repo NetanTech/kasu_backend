@@ -19,20 +19,59 @@ def public(section: dict) -> dict:
     return {k: v for k, v in section.items() if not k.startswith("_")}
 
 
+# A brief needs at least this much in the week to say anything trustworthy (KASU-030).
+MIN_WEEK_TRANSACTIONS = 3
+
+
 def _signed(pct: Decimal) -> str:
     return f"up {pct}%" if pct >= 0 else f"down {abs(pct)}%"
 
 
-def _brief_lines(s: Snapshot) -> list[str]:
+def _line(
+    text: str,
+    metric: str,
+    confidence: str,
+    *,
+    change_pct=None,
+    basis: str = "calculated",
+    **evidence,
+) -> dict:
+    """One brief insight: what changed, the evidence behind it, and how sure we are."""
+    return {
+        "text": text,
+        "metric": metric,
+        "change_pct": change_pct,
+        "evidence": {k: str(v) if isinstance(v, Decimal) else v for k, v in evidence.items()},
+        "basis": basis,
+        "confidence": confidence,
+    }
+
+
+def _at_most(level: str, cap: str) -> str:
+    order = ["low", "medium", "high"]
+    return order[min(order.index(level), order.index(cap))]
+
+
+def _brief_lines(s: Snapshot) -> list[dict]:
     o = s.overview
+    conf = o["confidence"]["level"]
     lines = []
 
     revenue = Decimal(o["revenue"]["value"])
     rev_chg = o["change_vs_previous_pct"]["revenue"]
     if revenue or rev_chg is not None:
-        line = f"Sales were ₦{revenue:,.0f}"
-        line += f", {_signed(Decimal(rev_chg))} on the week before." if rev_chg is not None else "."
-        lines.append(line)
+        text = f"Sales were ₦{revenue:,.0f}"
+        text += f", {_signed(Decimal(rev_chg))} on the week before." if rev_chg is not None else "."
+        lines.append(
+            _line(
+                text,
+                "revenue",
+                conf,
+                change_pct=rev_chg,
+                revenue=revenue,
+                previous_revenue=o["previous"]["revenue"],
+            )
+        )
 
     margin, prev_margin = o["gross_margin_pct"], o["previous"]["gross_margin_pct"]
     if (
@@ -42,12 +81,33 @@ def _brief_lines(s: Snapshot) -> list[str]:
         and abs(Decimal(margin) - Decimal(prev_margin)) >= 1
     ):
         verb = "rose" if Decimal(margin) > Decimal(prev_margin) else "fell"
-        lines.append(f"Gross margin {verb} from {prev_margin}% to {margin}%.")
+        lines.append(
+            _line(
+                f"Gross margin {verb} from {prev_margin}% to {margin}%.",
+                "gross_margin_pct",
+                conf,
+                gross_margin_pct=margin,
+                previous_gross_margin_pct=prev_margin,
+                change_points=Decimal(margin) - Decimal(prev_margin),
+            )
+        )
 
     net = Decimal(o["net_profit"]["value"])
     if revenue:
-        label = "Estimated profit" if o["net_profit"]["basis"] == "estimated" else "Profit"
-        lines.append(f"{label}: {'-' if net < 0 else ''}₦{abs(net):,.0f}.")
+        estimated = o["net_profit"]["basis"] == "estimated"
+        lines.append(
+            _line(
+                f"{'Estimated profit' if estimated else 'Profit'}: "
+                f"{'-' if net < 0 else ''}₦{abs(net):,.0f}.",
+                "net_profit",
+                # An estimated profit is never reported as high confidence.
+                _at_most(conf, "medium") if estimated else conf,
+                change_pct=o["change_vs_previous_pct"]["net_profit"],
+                basis=o["net_profit"]["basis"],
+                net_profit=net,
+                previous_net_profit=o["previous"]["net_profit"],
+            )
+        )
 
     movers = [
         c
@@ -58,46 +118,143 @@ def _brief_lines(s: Snapshot) -> list[str]:
         c = max(movers, key=lambda c: abs(Decimal(c["amount"]) - Decimal(c["previous_amount"])))
         verb = "increased" if Decimal(c["change_pct"]) > 0 else "decreased"
         lines.append(
-            f"{c['category'].replace('_', ' ').capitalize()} expenses {verb} "
-            f"{abs(Decimal(c['change_pct']))}%."
+            _line(
+                f"{c['category'].replace('_', ' ').capitalize()} expenses {verb} "
+                f"{abs(Decimal(c['change_pct']))}%.",
+                "expense_category",
+                conf,
+                change_pct=c["change_pct"],
+                category=c["category"],
+                amount=c["amount"],
+                previous_amount=c["previous_amount"],
+            )
         )
 
     fast = [i for i in s.inventory["_items"] if i.movement == "fast" and i.days_left is not None]
     if fast:
         i = max(fast, key=lambda i: i.revenue_in_window)
+        counted = i.stock_basis == "counted"
         lines.append(
-            f"{i.name}, your fastest-selling product, has about "
-            f"{i.days_left.quantize(Decimal('1'))} days of stock left."
+            _line(
+                f"{i.name}, your fastest-selling product, has about "
+                f"{i.days_left.quantize(Decimal('1'))} days of stock left.",
+                "days_of_stock",
+                # Stock worked out from records alone is an estimate until someone counts it.
+                conf if counted else _at_most(conf, "medium"),
+                basis="calculated" if counted else "estimated",
+                product=i.name,
+                days_left=i.days_left.quantize(Decimal("0.1")),
+                stock_basis=i.stock_basis,
+            )
         )
 
     withdrawn = Decimal(o["personal_expenses"]["value"]) + Decimal(o["owner_withdrawals"]["value"])
     if withdrawn:
-        lines.append(f"₦{withdrawn:,.0f} was taken out for personal use.")
+        lines.append(
+            _line(
+                f"₦{withdrawn:,.0f} was taken out for personal use.",
+                "personal_and_withdrawals",
+                conf,
+                change_pct=o["change_vs_previous_pct"]["personal_and_withdrawals"],
+                personal_expenses=o["personal_expenses"]["value"],
+                owner_withdrawals=o["owner_withdrawals"]["value"],
+            )
+        )
 
     flow = Decimal(o["net_cash_flow"]["value"])
     if flow:
-        lines.append(f"Cash {'increased' if flow > 0 else 'decreased'} by ₦{abs(flow):,.0f}.")
+        lines.append(
+            _line(
+                f"Cash {'increased' if flow > 0 else 'decreased'} by ₦{abs(flow):,.0f}.",
+                "net_cash_flow",
+                conf,
+                cash_in=o["cash_in"]["value"],
+                cash_out=o["cash_out"]["value"],
+                net_cash_flow=flow,
+            )
+        )
     return lines
+
+
+def _insufficient_prompt(s: Snapshot) -> str | None:
+    """Why this week can't support a brief, phrased as what to do about it; None if it can."""
+    o = s.overview
+    count = o["data"]["transactions"]
+    pending = o["data"]["provisional_excluded"]
+    has_sales = Decimal(o["revenue"]["value"]) > 0
+    if count >= MIN_WEEK_TRANSACTIONS and has_sales:
+        return None
+    if count == 0:
+        need = "No transactions were recorded this week."
+    elif not has_sales:
+        need = f"{count} transaction(s) were recorded this week, but no sales."
+    else:
+        need = f"Only {count} transaction(s) were recorded this week."
+    ask = (
+        f"Record at least {MIN_WEEK_TRANSACTIONS} transactions a week, including your sales, "
+        "and your next brief will show how your business is doing."
+    )
+    if pending:
+        ask += f" You also have {pending} unconfirmed transaction(s); confirm them to count them."
+    return f"{need} {ask}"
 
 
 def weekly_brief(
     db: Session, business_id, business_name: str, week_ending: date, include_provisional=False
 ) -> dict:
-    """The 7 days ending on `week_ending`, compared with the 7 days before."""
+    """The 7 days ending on `week_ending`, compared with the 7 days before.
+
+    `status` is "ready", or "insufficient_data" when the week is too thin to say anything
+    reliable. Then there are no highlights or recommendations, only a `prompt` saying what to
+    add, so a thin week never produces a misleading brief (KASU-030)."""
     start = week_ending - timedelta(days=6)
     view = LedgerView(db, business_id, week_ending, include_provisional)
     s = build_snapshot(view, start, week_ending)
+    title = f"*{business_name}: your week ({start:%d %b} – {week_ending:%d %b})*"
+
+    prompt = _insufficient_prompt(s)
+    if prompt:
+        return {
+            "status": "insufficient_data",
+            "period": {"start": start, "end": week_ending},
+            "prompt": prompt,
+            "highlights": [],
+            "recommendations": [],
+            "alerts": [],
+            "health_score": {"score": None, "band": None},
+            "confidence": s.overview["confidence"],
+            "data": s.overview["data"],
+            "text": "\n".join([title, "", prompt]),
+        }
+
     insights = insights_from(s)
     health = health_from(s)
-
     highlights = _brief_lines(s)
-    actions = [i.recommendation for i in insights if i.recommendation and i.severity != "positive"]
-    recommendations = list(dict.fromkeys(actions))[:3]  # de-duplicate, keep order
 
-    text = [f"*{business_name}: your week ({start:%d %b} – {week_ending:%d %b})*", ""]
-    text += [f"• {line}" for line in highlights] or ["• No transactions recorded this week."]
+    # Each recommendation keeps the evidence and confidence of the insight behind it.
+    recommendations: list[dict] = []
+    for i in insights:
+        if not i.recommendation or i.severity == "positive":
+            continue
+        if any(r["text"] == i.recommendation for r in recommendations):
+            continue
+        recommendations.append(
+            {
+                "text": i.recommendation,
+                "because": i.title,
+                "code": i.code,
+                "evidence": i.evidence,
+                "basis": "recommended",
+                "confidence": i.confidence,
+            }
+        )
+    recommendations = recommendations[:3]
+
+    text = [title, ""]
+    text += [f"• {line['text']}" for line in highlights]
     if recommendations:
-        text += ["", "*What to do next*"] + [f"{n}. {r}" for n, r in enumerate(recommendations, 1)]
+        text += ["", "*What to do next*"]
+        text += [f"{n}. {r['text']}" for n, r in enumerate(recommendations, 1)]
     if health["score"] is not None:
         text += [
             "",
@@ -107,12 +264,15 @@ def weekly_brief(
         text += ["", "_Some numbers are estimates; see the app for details._"]
 
     return {
+        "status": "ready",
         "period": {"start": start, "end": week_ending},
+        "prompt": None,
         "highlights": highlights,
         "recommendations": recommendations,
         "alerts": [i.as_dict() for i in insights if i.severity in ("critical", "warning")],
         "health_score": {"score": health["score"], "band": health["band"]},
         "confidence": s.overview["confidence"],
+        "data": s.overview["data"],
         # Ready to send over WhatsApp/SMS/email (WhatsApp-style *bold* / _italic_).
         "text": "\n".join(text),
     }

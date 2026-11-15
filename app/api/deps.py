@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from app.core.db import get_db
 from app.core.security import decode_token
 from app.models import Business, BusinessMember, User
 from app.models.enums import ROLE_PERMISSIONS, MemberRole, Permission
+from app.services.security import AccessDenied
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -20,20 +21,26 @@ def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     db: Session = Depends(get_db),
 ) -> User:
-    unauthorized = HTTPException(
-        status.HTTP_401_UNAUTHORIZED,
-        "Not authenticated",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    def unauthorized(reason: str, user_id: uuid.UUID | None = None) -> AccessDenied:
+        return AccessDenied(
+            status.HTTP_401_UNAUTHORIZED,
+            "Not authenticated",
+            reason=reason,
+            user_id=user_id,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     if creds is None:
-        raise unauthorized
+        raise unauthorized("missing_token")
     try:
         user_id = decode_token(creds.credentials, "access")
     except jwt.InvalidTokenError:
-        raise unauthorized from None
+        raise unauthorized("invalid_token") from None
     user = db.get(User, user_id)
-    if user is None or not user.is_active:
-        raise unauthorized
+    if user is None:
+        raise unauthorized("invalid_token")
+    if not user.is_active:
+        raise unauthorized("inactive_user", user.id)
     return user
 
 
@@ -65,7 +72,13 @@ def get_business(
     ).first()
     if row is None:
         # 404, not 403: don't reveal that a business the user can't access exists.
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Business not found")
+        raise AccessDenied(
+            status.HTTP_404_NOT_FOUND,
+            "Business not found",
+            reason="not_a_member",
+            user_id=user.id,
+            business_id=business_id,
+        )
     return BusinessContext(business=row[0], user=user, role=row[1])
 
 
@@ -74,10 +87,18 @@ def require(permission: Permission) -> Callable[..., BusinessContext]:
 
     def dependency(ctx: BusinessContext = Depends(get_business)) -> BusinessContext:
         if not ctx.can(permission):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"Your role ({ctx.role.value}) can't do this",
-            )
+            raise forbidden(ctx, permission)
         return ctx
 
     return dependency
+
+
+def forbidden(ctx: BusinessContext, permission: Permission) -> AccessDenied:
+    return AccessDenied(
+        status.HTTP_403_FORBIDDEN,
+        f"Your role ({ctx.role.value}) can't do this",
+        reason="missing_permission",
+        user_id=ctx.user.id,
+        business_id=ctx.id,
+        details={"role": ctx.role.value, "permission": permission.value},
+    )

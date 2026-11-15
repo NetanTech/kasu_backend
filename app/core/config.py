@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     app_url: str = "http://localhost:3000"
     invite_days: int = 7
 
+    # Weekly briefs: weeks run Monday-Sunday in this timezone; businesses with no activity
+    # for this many days stop getting them.
+    brief_timezone: str = "Africa/Lagos"
+    brief_active_days: int = 60
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"
