@@ -24,6 +24,16 @@ Interactive API docs: http://localhost:8000/docs
 uv run pytest                   # tests (uses the kasu_test database, wiped per run)
 uv run ruff check . && uv run ruff format .
 uv run alembic revision --autogenerate -m "describe change"   # after changing models
+uv run python -m app.evaluation            # extraction accuracy report (KASU-018 targets)
+uv run python -m app.jobs.data_quality     # platform-wide unresolved/correction rates
+```
+
+## Scheduled jobs
+
+```bash
+# Weekly Business Brief: every Monday 06:00 Lagos time, for the Monday–Sunday week just ended.
+# Idempotent (one brief per business per week); exits non-zero if any business failed.
+0 6 * * 1  cd /srv/kasu && uv run python -m app.jobs.weekly_briefs
 ```
 
 ## Layout
@@ -49,6 +59,11 @@ app/
     intelligence.py    rule-based insights (what happened / why / evidence / what to do) and
                        the Business Health Score
     reports.py         Weekly Business Brief (with WhatsApp-ready text) and dashboard payload
+    briefs.py          weekly generation, in-app delivery, open-rate tracking
+    security.py        AccessDenied: refused requests are answered *and* logged
+    data_quality.py    unresolved-record rate, critical-field correction rate
+  evaluation/    labelled Nigerian-style records + accuracy harness (≥98% fields, ≥95% precision)
+  jobs/          command-line jobs run by cron (weekly briefs, data-quality report)
 migrations/      Alembic migrations
 tests/           API-level tests against real Postgres
 ```

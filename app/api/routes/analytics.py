@@ -9,6 +9,7 @@ from app.core.db import get_db
 from app.models.enums import Permission
 from app.services import analytics
 from app.services.customers import customers_from
+from app.services.data_quality import data_quality
 from app.services.intelligence import build_snapshot, health_from, insights_from
 from app.services.inventory import inventory_from
 from app.services.reports import dashboard, public, weekly_brief
@@ -123,6 +124,20 @@ def customers(
     s, e = _range(start, end)
     view = analytics.LedgerView(db, ctx.id, e)
     return {"currency": ctx.business.currency, **customers_from(view, s, e)}
+
+
+@router.get("/data-quality")
+def data_quality_view(
+    start: date | None = None,
+    end: date | None = None,
+    ctx: BusinessContext = Depends(require(Permission.VIEW_FINANCIALS)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """How clean this business's records are: unresolved and unconfirmed records, and how
+    often critical fields had to be corrected. Default: the last 90 days."""
+    end = end or date.today()
+    s, e = _range(start or end - timedelta(days=89), end)
+    return data_quality(db, ctx.id, s, e)
 
 
 # ------------------------------------------------------------------ intelligence

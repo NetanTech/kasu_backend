@@ -8,8 +8,13 @@ corrections to `parsed` can be re-validated without re-reading the file.
 from decimal import Decimal
 from typing import Any
 
-from app.models.enums import Settlement, TransactionKind
-from app.services.classification import guess_category, guess_kind, normalize_category
+from app.models.enums import INFLOW_KINDS, Settlement, TransactionKind
+from app.services.classification import (
+    Guess,
+    guess_category,
+    guess_kind,
+    normalize_category,
+)
 from app.services.normalization import (
     normalize_key,
     parse_amount,
@@ -100,12 +105,27 @@ def extract_row(
         filter(None, [parsed["description"], parsed["product"], text("category")])
     )
     kind_guess = guess_kind(text("kind"))
-    if kind_guess.value is None and text("kind") is None:
+    from_words = kind_guess.value is None and text("kind") is None
+    if from_words:
         kind_guess = guess_kind(describing)
+        if (
+            kind_guess.value is not None
+            and direction is not None
+            and (kind_guess.value in INFLOW_KINDS) != (direction == TransactionKind.SALE)
+        ):
+            # The words point the other way from the money: "Wages for sales girl" paid out
+            # isn't a sale. Trust the money-in/money-out column.
+            kind_guess = Guess(None, 0.0)
     if kind_guess.value is not None:
         parsed["kind"], conf["kind"] = str(kind_guess.value), kind_guess.confidence
         if text("kind") is not None:
             conf["kind"] = max(conf["kind"], 0.9)  # the user labelled it themselves
+        elif kind_guess.value in (TransactionKind.SALE, TransactionKind.PURCHASE) and (
+            guess_category(describing).value not in (None, "supplies")
+        ):
+            # Mixed signals, e.g. "Keke to deliver goods": "goods" says purchase, "keke" says
+            # transport expense. Ask instead of guessing.
+            conf["kind"] = min(conf["kind"], 0.6)
     elif text("kind") is not None:
         parsed["kind"], conf["kind"] = None, 0.0
         parse_errors["kind"] = f"Don't know what transaction type '{text('kind')}' is"

@@ -174,13 +174,25 @@ def test_health_score(shop):
 
 
 def test_weekly_brief(shop):
+    # The scenario's last week has only two sales; a brief needs at least three records.
+    _post(shop, "expense", 10_000, "2026-10-30", category="transport")
     b = shop.get("/brief", params={"week_ending": "2026-10-31"}).json()
+    assert b["status"] == "ready"
     assert b["period"] == {"start": "2026-10-25", "end": "2026-10-31"}
-    assert b["highlights"][0].startswith("Sales were ₦276,000")
-    assert any("fastest-selling" in line and "Rice" in line for line in b["highlights"])
+    lines = b["highlights"]
+    assert lines[0]["text"].startswith("Sales were ₦276,000")
+    assert lines[0]["metric"] == "revenue" and lines[0]["evidence"]["revenue"] == "276000.00"
+    stock = next(line for line in lines if "fastest-selling" in line["text"])
+    assert "Rice" in stock["text"] or "Beans" in stock["text"]
+    # Stock from records alone is an estimate, never reported as high confidence.
+    assert stock["basis"] == "estimated" and stock["confidence"] != "high"
     assert b["text"].startswith("*Mama Nkechi Provisions: your week (25 Oct – 31 Oct)*")
     assert "Business Health Score" in b["text"]
-    assert len(b["recommendations"]) <= 3
+    # At least one recommendation, each with the evidence and confidence behind it.
+    assert 1 <= len(b["recommendations"]) <= 3
+    for r in b["recommendations"]:
+        assert r["text"] and r["because"] and r["evidence"]
+        assert r["basis"] == "recommended" and r["confidence"] in ("high", "medium", "low")
 
 
 def test_dashboard(shop):
@@ -202,5 +214,6 @@ def test_empty_business_doesnt_crash(api):
     assert d["alerts"] == []
     assert d["confidence"]["level"] == "low"
     b = api.get("/brief", params={"week_ending": "2026-10-31"}).json()
-    assert "No transactions recorded this week." in b["text"]
+    assert b["status"] == "insufficient_data"
+    assert b["prompt"].startswith("No transactions were recorded this week.")
     assert api.get("/insights", params=OCT).json()["insights"] == []

@@ -73,3 +73,15 @@ class AuditEventOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AccessDenialOut(BaseModel):
+    id: uuid.UUID
+    created_at: datetime
+    user_id: uuid.UUID | None = Field(description="Who tried; null if they weren't signed in")
+    method: str
+    path: str
+    status_code: int
+    reason: str
+
+    model_config = {"from_attributes": True}
